@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=yes">
+<meta name="theme-color" content="#2b63d9">
+<title>订单一键拨号</title>
+<script src="jsqr.min.js"></script>
+<style>
+ *{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,-apple-system,"PingFang SC",sans-serif}
+ body{padding:10px 10px calc(14px + env(safe-area-inset-bottom));background:#f4f5f7;font-size:14px;-webkit-tap-highlight-color:transparent}
+ .box{background:#fff;border-radius:12px;padding:14px;margin-bottom:12px;box-shadow:0 1px 4px rgba(0,0,0,.04)}
+ h3{font-size:15px;margin-bottom:4px}
+ .row{display:flex;gap:8px;margin:8px 0;flex-wrap:wrap;align-items:center}
+ textarea{width:100%;padding:10px;border:1px solid #ddd;border-radius:8px;font-size:13px;min-height:120px;margin:8px 0;font-family:ui-monospace,Menlo,monospace;resize:vertical}
+ input,select{padding:10px;border:1px solid #ddd;border-radius:8px;font-size:14px;background:#fff}
+ button{padding:11px 14px;background:#2b63d9;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px;font-weight:600;min-height:44px}
+ button:active{opacity:.85}
+ .g{background:#777}.d{background:#e63946}.ghost{background:#eef2ff;color:#2b63d9;border:1px solid #c7dbfa}
+ .tag{padding:6px 8px;font-size:12px;background:#e8f0fe;color:#2b63d9;border:1px solid #c7dbfa;border-radius:6px;margin:3px;min-height:auto}
+ .wrap{overflow-x:auto;-webkit-overflow-scrolling:touch;margin-top:10px;border-radius:10px;border:1px solid #eee}
+ table{width:100%;border-collapse:collapse;font-size:13px;min-width:760px}
+ th,td{border-bottom:1px solid #eee;border-right:1px solid #eee;padding:9px 6px;text-align:center;white-space:nowrap}
+ th{background:#f8f8f8;font-size:12px;color:#555}
+ td input[type=text]{width:100%;padding:6px;border:1px solid #e2e2e2;border-radius:6px;font-size:13px}
+ .phone{color:#2b63d9;text-decoration:none;font-weight:700}
+ #scanModal{display:none;position:fixed;inset:0;background:#000;z-index:99}
+ #scanModal video{width:100%;height:100%;object-fit:cover}
+ .close{position:absolute;top:calc(14px + env(safe-area-inset-top));right:14px;background:#e63946;color:#fff;padding:10px 14px;border-radius:10px;font-size:15px;z-index:100}
+ .scan-tip{position:absolute;top:calc(14px + env(safe-area-inset-top));left:14px;color:#fff;font-size:13px;background:rgba(0,0,0,.45);padding:6px 10px;border-radius:8px;z-index:100}
+ .tip{color:#666;margin:6px 0;font-size:12px;line-height:1.5}
+ #canvas{display:none}
+</style>
+</head>
+<body>
+<div class="box">
+    <h3>📝 粘贴订单</h3>
+    <textarea id="txtInput" placeholder="一行一条：订单号 + 空格/Tab + 手机号&#10;6917808933767753079&#9;15784653986,5187&#10;&#10;也可以扫码或选图片识别"></textarea>
+    <div class="row">
+        <button id="btnParse">✅ 解析导入</button>
+        <button id="btnScan">📷 扫码</button>
+        <button id="btnPhoto" class="ghost">🖼️ 选图识别</button>
+    </div>
+    <div class="row">
+        <button id="btnExport" class="g">导出 CSV</button>
+        <button id="btnClear" class="d">清空全部</button>
+    </div>
+    <p class="tip">重复订单号会自动跳过。</p>
+</div>
+
+<div class="box">
+    <div class="row">
+        <input id="syncUrl" placeholder="服务器地址 如 1.2.3.4:8000" style="flex:1;min-width:150px">
+        <input id="syncToken" placeholder="密钥(可空)" style="flex:1;min-width:100px">
+        <button id="btnSyncSave" class="g">保存</button>
+    </div>
+    <div class="row">
+        <button id="btnSync">📡 立即同步</button>
+        <span class="tip" id="syncTip" style="flex:1">填好地址点保存，之后改动会自动同步（不含手机号）</span>
+    </div>
+</div>
+
+<div class="box">
+    <div class="row">
+        <input id="searchInput" placeholder="搜订单号/手机号" style="flex:1;min-width:140px">
+        <select id="filterStatus">
+            <option value="all">全部</option>
+            <option value="ok">已拨打</option>
+            <option value="no">未拨打</option>
+        </select>
+        <button id="btnSearch">搜索</button>
+        <button id="btnReset" class="g">重置</button>
+    </div>
+</div>
+
+<div class="box">
+    <div id="stat" class="tip">总数：0｜已拨打：0｜未拨打：0</div>
+    <div class="wrap">
+        <table>
+            <thead><tr><th>序号</th><th>订单号</th><th>手机号</th><th>拨打</th><th>时间</th><th>快捷备注</th><th>备注</th><th>操作</th></tr></thead>
+            <tbody id="tableBody"></tbody>
+        </table>
+    </div>
+</div>
+
+<div id="scanModal">
+    <span class="scan-tip">对准二维码</span>
+    <button class="close" id="btnCloseScan">关闭 ✕</button>
+    <video id="scanVideo" autoplay muted playsinline></video>
+    <canvas id="canvas"></canvas>
+</div>
+
+<input type="file" id="photoInput" accept="image/*" hidden>
+
+<script>
+/* ================= 数据库 ================= */
+const DB_NAME = "CallOrderDB", STORE = "orders";
+let db = null;
+
+function initDB() {
+    return new Promise((resolve, reject) => {
+        const req = indexedDB.open(DB_NAME, 1);
+        req.onupgradeneeded = e => {
+            const d = e.target.result;
+            if (!d.objectStoreNames.contains(STORE)) {
+                const os = d.createObjectStore(STORE, { keyPath: "id" });
+                os.createIndex("status", "status");
+                os.createIndex("orderId", "orderId");
+            }
+        };
+        req.onsuccess = e => { db = e.target.result; resolve(db); };
+        req.onerror = e => reject(e);
+    });
+}
+function txDone(tx) {
+    return new Promise((res, rej) => {
+        tx.oncomplete = () => res();
+        tx.onerror = () => rej(tx.error);
+        tx.onabort = () => rej(tx.error);
+    });
+}
+function getAllItems() {
+    return new Promise(resolve => {
+        const tx = db.transaction(STORE, "readonly");
+        const req = tx.objectStore(STORE).getAll();
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => resolve([]);
+    });
+}
+function saveItem(item) {
+    const tx = db.transaction(STORE, "readwrite");
+    tx.objectStore(STORE).put(item);
+    return txDone(tx);
+}
+function deleteItem(id) {
+    const tx = db.transaction(STORE, "readwrite");
+    tx.objectStore(STORE).delete(id);
+    return txDone(tx);
+}
+function clearStore() {
+    const tx = db.transaction(STORE, "readwrite");
+    tx.objectStore(STORE).clear();
+    return txDone(tx);
+}
+function uid() { return "o" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+
+/* ================= 导入 ================= */
+async function importText(text) {
+    const existing = new Set((await getAllItems()).map(i => String(i.orderId)));
+    const lines = String(text || "").split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    const batch = [];
+    let added = 0, dup = 0, bad = 0;
+
+    for (const line of lines) {
+        const parts = line.split(/[\t\s]+/).filter(Boolean);
+        if (parts.length < 2) { bad++; continue; }
+        const orderId = parts[0], phone = parts[1];
+        if (existing.has(orderId)) { dup++; continue; }
+        existing.add(orderId);
+        batch.push({ id: uid(), orderId, phone, status: "no", callTime: "", remark: "", createdAt: Date.now() });
+        added++;
+    }
+    if (batch.length) {
+        const tx = db.transaction(STORE, "readwrite");
+        const os = tx.objectStore(STORE);
+        batch.forEach(it => os.put(it));
+        await txDone(tx);
+    }
+    if (added) scheduleSync();
+    return { added, dup, bad };
+}
+function importMsg(r) {
+    let s = "新增 " + r.added + " 条";
+    if (r.dup) s += "，跳过重复 " + r.dup;
+    if (r.bad) s += "，格式不对 " + r.bad + " 行";
+    return s;
+}
+
+/* ================= 列表 ================= */
+async function renderList() {
+    if (!db) return;
+    const all = await getAllItems();
+    all.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+
+    const key = document.getElementById("searchInput").value.trim();
+    const fs = document.getElementById("filterStatus").value;
+    let list = all;
+    if (key) list = list.filter(i => String(i.orderId).includes(key) || String(i.phone).includes(key));
+    if (fs !== "all") list = list.filter(i => i.status === fs);
+
+    const ok = all.filter(i => i.status === "ok").length;
+    document.getElementById("stat").textContent =
+        "总数：" + all.length + "｜已拨打：" + ok + "｜未拨打：" + (all.length - ok) +
+        (list.length !== all.length ? "｜显示：" + list.length : "");
+
+    const tb = document.getElementById("tableBody");
+    tb.innerHTML = "";
+    if (!list.length) {
+        const tr = document.createElement("tr");
+        const td = document.createElement("td");
+        td.colSpan = 8; td.style.color = "#999"; td.style.padding = "18px";
+        td.textContent = all.length ? "没有符合条件的记录" : "暂无数据";
+        tr.appendChild(td); tb.appendChild(tr); return;
+    }
+
+    list.forEach((it, idx) => {
+        const tr = document.createElement("tr");
+        const add = t => { const td = document.createElement("td"); td.textContent = t; tr.appendChild(td); };
+        add(idx + 1); add(it.orderId);
+
+        const tdP = document.createElement("td");
+        const a = document.createElement("a");
+        a.className = "phone";
+        a.textContent = it.phone;
+        a.href = "tel:" + String(it.phone).replace(/[^0-9+,;*#pPwW]/g, "");
+        a.addEventListener("click", () => markCall(it.id));
+        tdP.appendChild(a); tr.appendChild(tdP);
+
+        const tdC = document.createElement("td");
+        const cb = document.createElement("input");
+        cb.type = "checkbox"; cb.checked = it.status === "ok";
+        cb.style.width = "22px"; cb.style.height = "22px";
+        cb.addEventListener("change", () => toggleStatus(it.id));
+        tdC.appendChild(cb); tr.appendChild(tdC);
+
+        add(it.callTime || "");
+
+        const tdT = document.createElement("td");
+        ["无人接听", "忙音", "空号"].forEach(t => {
+            const b = document.createElement("button");
+            b.className = "tag"; b.textContent = t;
+            b.addEventListener("click", () => setRemark(it.id, t));
+            tdT.appendChild(b);
+        });
+        tr.appendChild(tdT);
+
+        const tdR = document.createElement("td");
+        const inp = document.createElement("input");
+        inp.type = "text"; inp.value = it.remark || ""; inp.placeholder = "备注";
+        let timer = null;
+        inp.addEventListener("input", () => {
+            const v = inp.value;
+            clearTimeout(timer);
+            timer = setTimeout(() => saveRemark(it.id, v), 500);
+        });
+        tdR.appendChild(inp); tr.appendChild(tdR);
+
+        const tdO = document.createElement("td");
+        const del = document.createElement("button");
+        del.className = "d"; del.textContent = "删除";
+        del.style.padding = "6px 10px"; del.style.fontSize = "12px";
+        del.addEventListener("click", () => removeItem(it.id));
+        tdO.appendChild(del); tr.appendChild(tdO);
+
+        tb.appendChild(tr);
+    });
+}
+
+async function findItem(id) {
+    const all = await getAllItems();
+    return all.find(x => x.id === id) || null;
+}
+async function markCall(id) {
+    const one = await findItem(id);
+    if (!one || one.status === "ok") return;
+    one.status = "ok";
+    one.callTime = new Date().toLocaleString();
+    await saveItem(one);
+    renderList();
+    scheduleSync();
+}
+async function toggleStatus(id) {
+    const one = await findItem(id);
+    if (!one) return;
+    if (one.status === "ok") { one.status = "no"; one.callTime = ""; }
+    else { one.status = "ok"; one.callTime = new Date().toLocaleString(); }
+    await saveItem(one);
+    renderList();
+    scheduleSync();
+}
+async function setRemark(id, txt) {
+    const one = await findItem(id);
+    if (!one) return;
+    one.remark = txt;
+    await saveItem(one);
+    renderList();
+    scheduleSync();
+}
+async function saveRemark(id, txt) {
+    const one = await findItem(id);
+    if (!one || one.remark === txt) return;
+    one.remark = txt;
+    await saveItem(one);
+    scheduleSync();
+}
+async function removeItem(id) {
+    if (!confirm("删除这条？")) return;
+    await deleteItem(id);
+    renderList();
+    scheduleSync();
+}
+
+/* ================= 导出 / 清空 ================= */
+function csvCell(v) { return '"' + String(v == null ? "" : v).replace(/"/g, '""') + '"'; }
+async function exportCsv() {
+    const all = await getAllItems();
+    if (!all.length) { alert("没有数据"); return; }
+    let csv = "\uFEFF" + ["订单号", "手机号", "拨打状态", "拨打时间", "备注"].map(csvCell).join(",") + "\r\n";
+    all.forEach(i => {
+        csv += [i.orderId, i.phone, i.status === "ok" ? "已拨打" : "未拨打", i.callTime, i.remark].map(csvCell).join(",") + "\r\n";
+    });
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const d = new Date(), p = n => String(n).padStart(2, "0");
+    a.href = url;
+    a.download = "订单拨打记录_" + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + ".csv";
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+async function clearAll() {
+    const all = await getAllItems();
+    if (!all.length) { alert("没有数据"); return; }
+    if (!confirm("清空 " + all.length + " 条？建议先导出备份")) return;
+    await clearStore();
+    renderList();
+}
+
+/* ================= 扫码 ================= */
+let scanActive = false, stream = null;
+async function openScan() {
+    if (typeof jsQR === "undefined") { alert("二维码库未加载"); return; }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { alert("此环境不能调用摄像头"); return; }
+    const video = document.getElementById("scanVideo");
+    document.getElementById("scanModal").style.display = "block";
+    try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } } });
+        video.srcObject = stream;
+        await video.play();
+        scanActive = true;
+        requestAnimationFrame(tick);
+    } catch (e) {
+        closeScan();
+        alert("打开摄像头失败：" + (e.message || e));
+    }
+}
+function tick() {
+    if (!scanActive) return;
+    const video = document.getElementById("scanVideo");
+    const canvas = document.getElementById("canvas");
+    if (video.readyState === video.HAVE_ENOUGH_DATA) {
+        canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const code = jsQR(img.data, img.width, img.height);
+        if (code && code.data) { const t = code.data; closeScan(); handleScan(t); return; }
+    }
+    requestAnimationFrame(tick);
+}
+async function closeScan() {
+    scanActive = false;
+    const video = document.getElementById("scanVideo");
+    if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+    video.srcObject = null;
+    document.getElementById("scanModal").style.display = "none";
+}
+async function handleScan(text) {
+    const r = await importText(text);
+    await renderList();
+    alert(r.added === 0 && r.dup > 0 ? "这个码的订单已导入过" : "导入：" + importMsg(r));
+}
+
+/* ================= 选图识别 ================= */
+async function decodeImage(file) {
+    if (!file) return;
+    if (typeof jsQR === "undefined") { alert("二维码库未加载"); return; }
+    const url = URL.createObjectURL(file);
+    try {
+        const img = new Image();
+        await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; });
+        const scale = Math.min(1, 1600 / Math.max(img.width, img.height));
+        const cv = document.createElement("canvas");
+        cv.width = Math.round(img.width * scale);
+        cv.height = Math.round(img.height * scale);
+        const ctx = cv.getContext("2d", { willReadFrequently: true });
+        ctx.drawImage(img, 0, 0, cv.width, cv.height);
+        let code = jsQR(ctx.getImageData(0, 0, cv.width, cv.height).data, cv.width, cv.height);
+        if (!code) {
+            const cv2 = document.createElement("canvas");
+            cv2.width = cv.width * 1.5; cv2.height = cv.height * 1.5;
+            const c2 = cv2.getContext("2d", { willReadFrequently: true });
+            c2.drawImage(cv, 0, 0, cv2.width, cv2.height);
+            code = jsQR(c2.getImageData(0, 0, cv2.width, cv2.height).data, cv2.width, cv2.height);
+        }
+        if (!code || !code.data) { alert("没认出二维码，靠近点再拍"); return; }
+        await handleScan(code.data);
+    } catch (e) {
+        alert("识别失败：" + e.message);
+    } finally { URL.revokeObjectURL(url); }
+}
+
+/* ================= 同步 ================= */
+const SYNC_KEY = "syncUrl", TOKEN_KEY = "syncToken";
+function getSyncUrl() { return (localStorage.getItem(SYNC_KEY) || "").trim(); }
+function getSyncToken() { return (localStorage.getItem(TOKEN_KEY) || "").trim(); }
+function setSyncTip(msg, ok) {
+    const el = document.getElementById("syncTip");
+    el.innerHTML = msg;
+    el.style.color = ok ? "#16a34a" : "#b45309";
+}
+
+let syncTimer = null;
+function scheduleSync() {
+    if (!getSyncUrl()) return;
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(() => syncToPC(true), 1500);
+}
+
+async function syncToPC(silent) {
+    const base = getSyncUrl();
+    if (!base) { if (!silent) alert("先填服务器地址并保存"); return; }
+    let u = /^https?:\/\//i.test(base) ? base : "http://" + base;
+    u = u.replace(/\/+$/, "") + "/sync";
+
+    const all = await getAllItems();
+    if (!all.length) { if (!silent) alert("还没有数据"); return; }
+
+    const payload = all.map(i => ({
+        orderId: String(i.orderId),
+        status: i.status === "ok" ? "ok" : "no",
+        callTime: i.callTime || "",
+        remark: i.remark || ""
+    }));
+
+    try {
+        const headers = { "Content-Type": "application/json" };
+        const tk = getSyncToken();
+        if (tk) headers["X-Token"] = tk;
+        const r = await fetch(u, { method: "POST", headers, body: JSON.stringify(payload) });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const j = await r.json();
+        setSyncTip("✅ 已同步 " + (j.count != null ? j.count : payload.length) + " 条 · " + new Date().toLocaleTimeString(), true);
+    } catch (e) {
+        setSyncTip("❌ 同步失败：" + e.message + "（检查服务是否开着、地址对不对）", false);
+    }
+}
+
+/* ================= 事件 ================= */
+document.getElementById("btnParse").addEventListener("click", async () => {
+    const t = document.getElementById("txtInput").value;
+    if (!t.trim()) { alert("先粘贴订单"); return; }
+    const r = await importText(t);
+    document.getElementById("txtInput").value = "";
+    await renderList();
+    alert("解析完成：" + importMsg(r));
+});
+document.getElementById("btnScan").addEventListener("click", openScan);
+document.getElementById("btnCloseScan").addEventListener("click", closeScan);
+document.getElementById("btnPhoto").addEventListener("click", () => document.getElementById("photoInput").click());
+document.getElementById("photoInput").addEventListener("change", e => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = "";
+    decodeImage(f);
+});
+document.getElementById("btnExport").addEventListener("click", exportCsv);
+document.getElementById("btnClear").addEventListener("click", clearAll);
+document.getElementById("btnSearch").addEventListener("click", renderList);
+document.getElementById("btnReset").addEventListener("click", () => {
+    document.getElementById("searchInput").value = "";
+    document.getElementById("filterStatus").value = "all";
+    renderList();
+});
+document.getElementById("searchInput").addEventListener("input", renderList);
+document.getElementById("filterStatus").addEventListener("change", renderList);
+document.getElementById("btnSync").addEventListener("click", () => syncToPC(false));
+document.getElementById("btnSyncSave").addEventListener("click", () => {
+    const v = document.getElementById("syncUrl").value.trim();
+    const t = document.getElementById("syncToken").value.trim();
+    if (!v) { alert("先填地址"); return; }
+    localStorage.setItem(SYNC_KEY, v);
+    localStorage.setItem(TOKEN_KEY, t);
+    setSyncTip("已保存 " + v + (t ? "（带密钥）" : "") + "，之后改动会自动同步", true);
+});
+
+/* ================= 启动 ================= */
+(async function () {
+    document.getElementById("syncUrl").value = getSyncUrl();
+    document.getElementById("syncToken").value = getSyncToken();
+    try {
+        await initDB();
+        await renderList();
+        if (getSyncUrl()) syncToPC(true);
+    } catch (e) {
+        alert("数据库打开失败：" + e.message);
+    }
+})();
+</script>
+</body>
+</html>
